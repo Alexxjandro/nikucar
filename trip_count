@@ -1,0 +1,32 @@
+CREATE OR REPLACE FUNCTION public.trip_count_function(driverid character varying)
+ RETURNS SETOF trip_count
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  driverCount INTEGER;
+  driverLevelId varchar;
+BEGIN
+  -- Verificar si hay registros existentes para el conductor
+  SELECT count(*) INTO driverCount FROM trip_count WHERE driver_id = driverid;
+
+  IF driverCount = 0 THEN
+    -- No hay registros, insertar uno nuevo con valor 1
+    INSERT INTO trip_count (driver_id, count) VALUES (driverid, 1);
+  ELSE
+    -- Hay registros, actualizar el contador existente
+    UPDATE trip_count SET count = count + 1 WHERE driver_id = driverid;
+  END IF;
+
+  -- Obtener el nivel de conductor correspondiente al resultado del conteo
+  SELECT driver_level_id INTO driverLevelId
+  FROM drivers_level
+  WHERE trip_count_start <= (SELECT count FROM trip_count WHERE driver_id = driverid)
+    AND trip_count_end >= (SELECT count FROM trip_count WHERE driver_id = driverid);
+
+  -- Insertar el nivel de conductor en la tabla drivers
+  UPDATE drivers SET driver_level_id = driverLevelId WHERE driver_id = driverid;
+
+  -- Devolver todas las filas para el conductor
+  RETURN QUERY SELECT * FROM trip_count WHERE driver_id = driverid;
+END;
+$function$
