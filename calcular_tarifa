@@ -1,26 +1,250 @@
-CREATE OR REPLACE FUNCTION public.calcular_distancia(start_latitude double precision, start_longitude double precision, end_latitude double precision, end_longitude double precision, tiempo_viaje_minutos integer)
+CREATE OR REPLACE FUNCTION public.calcular_tarifas_v1(start_latitude double precision, start_longitude double precision, end_latitude double precision, end_longitude double precision, tiempo_viaje_minutos integer, distancia_km double precision, user_id character varying, input_hour bigint)
  RETURNS SETOF calcular_tarifas_result
  LANGUAGE plpgsql
- STABLE
-AS $function$
-DECLARE
-    distancia_km FLOAT;
-    tarifa_id varchar;
-BEGIN
-  -- Generar un UUID aleatorio
-    tarifa_id := gen_random_uuid();
-    -- Calcular la distancia entre los puntos de inicio y fin del viaje, en kilómetros.
-    distancia_km := (
-        SELECT ST_DistanceSphere(
-            ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326),
-            ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)
-        ) / 1000
-    );
+AS $function$ 
 
-    -- Insertar el resultado en la tabla temporal
-    INSERT INTO calcular_tarifas_result (distancia_km, tarifa_id) VALUES (distancia_km, tarifa_id);
+DECLARE 
 
-    -- Devolver los resultados de la tabla temporal
-    RETURN QUERY SELECT * FROM calcular_tarifas_result;
+id_tarifa varchar;
+zona_id varchar;
+zona_end_id varchar;
+subtotal float;
+--uso_de_plataforma float;  se calcula en la aplicacion del conductor 
+subtotal_sin_impuestos float;
+impuestos_isr float;
+plataforma_iva float;
+vehiculo_id varchar;
+pago_total float;
+tarifa_total float;
+tarifa_subtotal float;
+tarifa_iva float;
+tarifa_comision float;
+cuota_de_solicitud float;
+tarifa_dinamica FLOAT;
+index float;
+rate_row RECORD;
+
+BEGIN 
+
+-- Generar un UUID aleatorio
+id_tarifa := gen_random_uuid();
+
+-- Obtener la zona (polígono) en la que se encuentra la ubicación del inicio del viaje.
+SELECT 
+  poligono_id INTO zona_id 
+FROM 
+  poligonos 
+WHERE 
+  ST_Contains(
+    poligono, 
+    ST_SetSRID(
+      ST_MakePoint(start_longitude, start_latitude), 
+      4326
+    )
+  ) 
+  AND status = true 
+LIMIT 
+  1;
+  
+-- Verificar si la ubicación de inicio está dentro de un polígono y su estado es "activo" (true)
+IF zona_id IS NOT NULL THEN -- Obtener la zona (polígono) en la que se encuentra la ubicación de fin del viaje, si la ubicación de inicio es válida.
+SELECT 
+  poligono_id INTO zona_id 
+FROM 
+  poligonos 
+WHERE 
+  ST_Contains(
+    poligono, 
+    ST_SetSRID(
+      ST_MakePoint(end_longitude, end_latitude), 
+      4326
+    )
+  ) 
+  AND status = true 
+LIMIT 
+  1;
+ 
+  
+-- Verificar si la ubicación de fin está dentro de un polígono y su estado es "activo" (true)
+IF zona_id IS NOT NULL THEN -- Crear la tabla temporal solo si no existe
+CREATE TEMP TABLE IF NOT EXISTS temp_resultados (
+  distancia_km float, 
+  tarifa_id varchar, 
+  zona_id varchar, 
+  subtotal float, 
+--uso_plataforma float,  se calcula en la aplicacion del conductor  
+  subtotal_sin_impuestos float, 
+  impuestos_isr float, 
+  plataforma_iva float, 
+  vehiculo_id varchar, 
+  user_id varchar,
+  pago_total float,
+  tarifa_total float,
+  tarifa_subtotal float,
+  tarifa_iva float,
+  tarifa_comision float,
+  cuota_de_solicitud float,
+  tarifa_dinamica float,
+  viaje_minutos float,
+  minutos_convertido varchar,
+  tarifa_total_convertido varchar,
+  distancia_convertida varchar,
+  index float
+ 
+);
+
+FOR rate_row IN 
+  SELECT 
+    r.rate_id, 
+    r.rate_per_minute, 
+    r.rate_per_kilometer, 
+    r.base_rate, 
+    r.minimum_rate, 
+    r.cuota_solicitud, 
+    r.impuestos_iva, 
+    r.impuestos_isr, 
+    r.plataforma_iva, 
+    r.vehiculo_id, 
+    r.poligono_id,
+    r.comision,
+    r.index,
+    r.status -- Agrega la columna 'status' a la consulta
+  FROM 
+    rates r 
+  WHERE 
+    r.poligono_id = zona_id
+LOOP 
+  IF rate_row.status THEN -- Verifica si status es true
+    -- Resto del código
+-- Calcular el subtotal para cada tarifa
+    subtotal := TRUNC(
+      GREATEST(
+        tiempo_viaje_minutos * rate_row.rate_per_minute + distancia_km * rate_row.rate_per_kilometer + rate_row.base_rate, 
+        rate_row.minimum_rate
+        ) * 100) / 100;
+  
+-- quitar iva al subtotal
+    subtotal_sin_impuestos := TRUNC(subtotal / rate_row.impuestos_iva * 100) / 100;
+
+-- Calcular ISR
+    impuestos_isr := TRUNC(subtotal_sin_impuestos * rate_row.impuestos_isr * 100) / 100;
+
+-- Calcular plataforma iva
+    plataforma_iva := TRUNC(subtotal_sin_impuestos * rate_row.plataforma_iva * 100) / 100;
+
+-- Calcular Uso de la plataforma 
+--uso_de_plataforma := TRUNC(subtotal_sin_impuestos * rate_row.uso_plataforma * 100) / 100;
+    
+        -- calcular comision
+    tarifa_comision := TRUNC((subtotal_sin_impuestos * rate_row.comision) * 100) / 100;
+    
+ -- Calcular pago total 
+    pago_total        := TRUNC((subtotal - tarifa_comision - impuestos_isr - plataforma_iva) * 100) / 100;
+
+-- Calcular la cuota de solicitud
+    cuota_de_solicitud := TRUNC( subtotal * rate_row.cuota_solicitud * 100) / 100;
+
+-- Sumar total tarifa
+    tarifa_total := TRUNC((subtotal + cuota_de_solicitud) * 100) / 100;
+    
+-- Sacar subtotal de la tarifa
+    tarifa_subtotal := TRUNC((tarifa_total / rate_row.impuestos_iva) * 100) / 100;
+    
+-- Sacar iva de la tarifa
+    tarifa_iva := TRUNC((tarifa_total - tarifa_subtotal) * 100) / 100;
+    -- Insertar el resultado en la tabla temporal solo si no existe
+    IF NOT EXISTS (
+      SELECT 
+        1 
+      FROM 
+        temp_resultados 
+      WHERE 
+        tarifa_id = rate_row.rate_id 
+        AND temp_resultados.zona_id = temp_resultados.zona_id
+    ) THEN -- Insertar el resultado en la tabla temporal
+      INSERT INTO temp_resultados (
+        distancia_km, 
+        tarifa_id, 
+        zona_id, 
+        subtotal, 
+        cuota_de_solicitud, 
+        --uso_de_plataforma,  se calcula en la aplicacion del conductor 
+        subtotal_sin_impuestos, 
+        impuestos_isr, 
+        plataforma_iva, 
+        vehiculo_id, 
+        user_id, 
+        pago_total, 
+        tarifa_total,
+        tarifa_subtotal,
+        tarifa_iva,
+        tarifa_comision,
+        tarifa_dinamica,
+        viaje_minutos,
+        index
+      ) 
+      VALUES 
+        (
+          distancia_km, 
+          rate_row.rate_id, 
+          zona_id, 
+          subtotal, 
+          cuota_de_solicitud, 
+          --uso_de_plataforma,  se calcula en la aplicacion del conductor
+          subtotal_sin_impuestos, 
+          impuestos_isr, 
+          plataforma_iva, 
+          rate_row.vehiculo_id, 
+          user_id, 
+          pago_total, 
+          tarifa_total,
+          tarifa_subtotal,
+          tarifa_iva,
+          tarifa_comision,
+          tarifa_dinamica,
+          tiempo_viaje_minutos,
+          index
+        );
+    END IF;
+  END IF;
+END LOOP;
+
+-- Devolver los resultados de la tabla temporal
+
+UPDATE temp_resultados
+SET minutos_convertido = 
+    CASE
+        WHEN tiempo_viaje_minutos >= 60 THEN CONCAT(FLOOR(tiempo_viaje_minutos / 60), 'h ', MOD(tiempo_viaje_minutos, 60), 'min')
+        ELSE CONCAT(tiempo_viaje_minutos, 'min')
+    END;
+    
+UPDATE temp_resultados
+SET tarifa_total_convertido = CONCAT('$', TO_CHAR(temp_resultados.tarifa_total, 'FM999999999.00'));
+
+--UPDATE temp_resultados
+--SET distancia_convertida = 
+    --CASE
+       -- WHEN temp_resultados.distancia_km > 1 THEN CONCAT(temp_resultados.distancia_km, 'km')
+       -- ELSE CONCAT(temp_resultados.distancia_km * 1000, 'm')
+   -- END;
+    
+UPDATE temp_resultados
+SET distancia_convertida = 
+    CASE
+        WHEN temp_resultados.distancia_km > 1 THEN CONCAT(CAST(temp_resultados.distancia_km AS numeric(5,1)), 'km')
+        ELSE CONCAT(CAST(temp_resultados.distancia_km * 1000 AS numeric(5,1)), 'm')
+    END;
+
+
+
+
+
+RETURN QUERY 
+SELECT 
+  * 
+FROM 
+  temp_resultados;
+END IF;
+END IF;
 END;
 $function$
