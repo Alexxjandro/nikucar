@@ -1,0 +1,26 @@
+CREATE OR REPLACE FUNCTION public.calcular_distancia(start_latitude double precision, start_longitude double precision, end_latitude double precision, end_longitude double precision, tiempo_viaje_minutos integer)
+ RETURNS SETOF calcular_tarifas_result
+ LANGUAGE plpgsql
+ STABLE
+AS $function$
+DECLARE
+    distancia_km FLOAT;
+    tarifa_id varchar;
+BEGIN
+  -- Generar un UUID aleatorio
+    tarifa_id := gen_random_uuid();
+    -- Calcular la distancia entre los puntos de inicio y fin del viaje, en kilómetros.
+    distancia_km := (
+        SELECT ST_DistanceSphere(
+            ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326),
+            ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)
+        ) / 1000
+    );
+
+    -- Insertar el resultado en la tabla temporal
+    INSERT INTO calcular_tarifas_result (distancia_km, tarifa_id) VALUES (distancia_km, tarifa_id);
+
+    -- Devolver los resultados de la tabla temporal
+    RETURN QUERY SELECT * FROM calcular_tarifas_result;
+END;
+$function$
