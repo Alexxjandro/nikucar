@@ -90,8 +90,30 @@ CREATE TEMP TABLE IF NOT EXISTS temp_resultados (
   tarifa_total_convertido varchar,
   distancia_convertida varchar,
   index float
- 
+  
 );
+
+CREATE FUNCTION verificarRangoHoraMilitar(@hora TIME) RETURNS BIT
+AS
+BEGIN
+    DECLARE @start_time TIME
+    DECLARE @end_time TIME
+    DECLARE @multiplier FLOAT
+
+    -- Obtener los valores de start_time y end_time de la tabla dynamic_time_slot
+    SELECT @start_time = start_time, @end_time = end_time, @multiplier = multiplier
+    FROM dynamic_time_slot
+
+    IF (@hora >= @start_time AND @hora <= @end_time)
+        UPDATE temp_resultados
+        SET tarifa_dinamica = @multiplier
+    ELSE
+        UPDATE temp_resultados
+        SET tarifa_dinamica = 1.0
+
+    RETURN @resultado
+END
+
 
 FOR rate_row IN 
   SELECT 
